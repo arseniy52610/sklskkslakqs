@@ -3,3 +3,4 @@ SQLAlchemy==1.4.41
 pydantic==2.4.1
 python-dotenv==1.0.0
 babel==2.12.1
+sqlmodel
