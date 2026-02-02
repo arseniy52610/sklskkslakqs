@@ -1,4 +1,4 @@
-aiogram==3.4.1
+aiogram
 sqlmodel==0.0.14
 SQLAlchemy>=2.0
 python-dotenv==1.0.0
