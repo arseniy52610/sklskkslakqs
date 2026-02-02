@@ -1,6 +1,5 @@
-aiogram
-SQLAlchemy==1.4.41
-pydantic==2.4.1
+aiogram==3.4.1
+sqlmodel==0.0.14
+SQLAlchemy>=2.0
 python-dotenv==1.0.0
-babel==2.12.1
-sqlmodel
+babel==2.14.0
