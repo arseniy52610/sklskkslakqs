@@ -4,15 +4,19 @@ from os import getenv
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, html
-from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
-    Message as MessageType, BusinessMessagesDeleted, CallbackQuery,
-    LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup
+    Message as MessageType,
+    CallbackQuery,
+    LabeledPrice,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    PreCheckoutQuery,
+    BusinessConnection,
+    BusinessMessagesDeleted
 )
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import BusinessConnection, PreCheckoutQuery
 from sqlmodel import SQLModel, Session as SQLSession, select, Field
 from babel.dates import format_date
 
@@ -26,6 +30,7 @@ TOKEN = getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в .env!")
 
+# Создаем диспетчер
 dp = Dispatcher()
 
 # ------------------------
@@ -209,7 +214,7 @@ async def cmd_gift(message: MessageType):
     )
 
 # ------------------------
-# Сообщения бизнес-бота
+# Бизнес-сообщения
 # ------------------------
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
@@ -232,14 +237,14 @@ async def cb_handler(callback: CallbackQuery):
 
     if callback.data == "help":
         await callback.message.edit_text(
-        "<b>💫 Для подключения Delixor выполните следующие шаги:</b>\n\n"
-        "▶ Откройте настройки Telegram\n"
-        "▶ Перейдите в раздел «Telegram для Бизнеса»\n"
-        "▶ Выберите «Чат-боты» и найдите DelixorBot\n\n"
-        "<blockquote>💻 В разрешениях для бота выберите все пункты раздела Сообщения (5/5)</blockquote>\n"
-        "<blockquote>⚠️ Для подключения нашего мода требуется Telegram Premium</blockquote>",
-        reply_markup=back_keyboard(),
-        parse_mode=ParseMode.HTML
+            "<b>💫 Для подключения Delixor выполните следующие шаги:</b>\n\n"
+            "▶ Откройте настройки Telegram\n"
+            "▶ Перейдите в раздел «Telegram для Бизнеса»\n"
+            "▶ Выберите «Чат-боты» и найдите DelixorBot\n\n"
+            "<blockquote>💻 В разрешениях для бота выберите все пункты раздела Сообщения (5/5)</blockquote>\n"
+            "<blockquote>⚠️ Для подключения нашего мода требуется Telegram Premium</blockquote>",
+            reply_markup=back_keyboard(),
+            parse_mode=ParseMode.HTML
         )
     elif callback.data == "back":
         await callback.message.edit_text(
@@ -299,7 +304,7 @@ async def handle_deleted(deleted: BusinessMessagesDeleted):
             await deleted.bot.send_message(chat_id=user_chat, text=text)
 
 # ------------------------
-# Редактирование
+# Редактирование сообщений
 # ------------------------
 @dp.edited_business_message()
 async def handle_edit(message: MessageType):
@@ -331,9 +336,7 @@ async def save_business(message: MessageType):
             chat_id=user_chat,
             text="⚠️ У вас нет активной подписки! Оплатите Stars ⭐",
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="💳 Оплатить", callback_data="periods")]
-                ]
+                inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить", callback_data="periods")]]
             )
         )
         return
@@ -354,7 +357,7 @@ async def save_business(message: MessageType):
 # Запуск
 # ------------------------
 async def main():
-    bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
@@ -362,4 +365,3 @@ if __name__ == "__main__":
     db.init()
     SQLModel.metadata.create_all(db.engine)
     asyncio.run(main())
-
