@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from os import getenv
+import os
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, html
@@ -24,13 +24,19 @@ import db
 from db.models.message import Message
 
 from dotenv import load_dotenv
-load_dotenv()
 
-TOKEN = getenv("BOT_TOKEN")
+# ------------------------
+# Загрузка .env и токена
+# ------------------------
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN не задан в .env!")
 
-# Создаем диспетчер
+# ------------------------
+# Инициализация бота и диспетчера (КАК ТЫ ПРОСИЛ)
+# ------------------------
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 # ------------------------
@@ -248,11 +254,10 @@ async def cb_handler(callback: CallbackQuery):
         )
     elif callback.data == "back":
         await callback.message.edit_text(
-            f"👋 Привет, {html.bold(callback.from_user.full_name)}!\n\nDelixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
+            f"👋 Привет, {html.bold(callback.from_user.full_name)}!\n\n"
+            "Delixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
             reply_markup=start_keyboard()
         )
-    elif callback.data == "support":
-        await callback.message.answer("💡 Поддержка: @YourSupportUsername")
 
 # ------------------------
 # PreCheckout
@@ -357,7 +362,6 @@ async def save_business(message: MessageType):
 # Запуск
 # ------------------------
 async def main():
-    bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
