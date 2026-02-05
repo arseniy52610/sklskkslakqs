@@ -15,6 +15,7 @@ from aiogram.types import (
     BusinessMessagesDeleted,
     Update,
     WebAppInfo,
+    FSInputFile,
 )
 from sqlmodel import SQLModel, Session as SQLSession, select, Field
 from babel.dates import format_date
@@ -80,7 +81,7 @@ def start_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 text="📖 Инструкция",
-                web_app=WebAppInfo(url="https://arseniy52610.github.io/stite/"),
+                web_app=WebAppInfo(url="https://z99526lr.beget.tech/"),
             ),
             InlineKeyboardButton(text="👤 Профиль", callback_data="profile")
         ],
@@ -150,7 +151,7 @@ async def cb_profile(callback: CallbackQuery):
 
     if sub and sub.active_until and sub.active_until > datetime.now():
         until = format_date(sub.active_until, "d MMMM yyyy", locale="ru")
-        text += f"<b>👤Роль:</b> Тестировщик"
+        text += f"<b>✅Подписка активна до:</b> {until}"
     else:
         text += "<b>Подписка:</b> ❌ не активна"
 
@@ -256,14 +257,39 @@ async def cmd_gift(message: MessageType):
     try:
         await message.bot.send_message(
             chat_id=user_id,
-            text=f"🧑‍💻 Вам выдали роль тестировщика до {format_date(active_until, 'd MMMM yyyy', locale='ru')}"
+            text=f"🎁 Вам подарили подписку на DelixorBOT!\n✅ Подписка активна до {format_date(active_until, 'd MMMM yyyy', locale='ru')}"
         )
     except Exception:
         pass
 
     await message.answer(
-        f"✅ Роль тестировщика успешна выдана {user_id} до {format_date(active_until, 'd MMMM yyyy', locale='ru')}"
+        f"✅ Подписка успешно подарена пользователю {user_id} до {format_date(active_until, 'd MMMM yyyy', locale='ru')}"
     )
+
+
+# ------------------------
+# Выгрузка базы данных (админ)
+# ------------------------
+@dp.message(Command("dump_db"))
+async def cmd_dump_db(message: MessageType):
+    if message.from_user.id not in ADMINS:
+        return await message.answer("⚠️ Эта команда доступна только админам!")
+
+    db_path = getattr(db.engine.url, "database", None)
+    if not db_path:
+        return await message.answer("⚠️ Не удалось определить путь к базе данных.")
+
+    if not db_path.endswith(".db"):
+        return await message.answer("⚠️ Поддерживается только SQLite база данных.")
+
+    try:
+        await message.bot.send_document(
+            chat_id=message.chat.id,
+            document=FSInputFile(db_path),
+            caption="📦 Текущая база данных",
+        )
+    except Exception:
+        await message.answer("⚠️ Не удалось отправить файл базы данных.")
 
 
 # ------------------------
@@ -327,7 +353,16 @@ async def cb_handler(callback: CallbackQuery):
         await callback.message.edit_text("💬 Ваши чаты:", reply_markup=keyboard)
 
     elif callback.data.startswith("open_chat_"):
-        unique_chat_id = callback.data[len("open_chat_"):]
+        payload = callback.data[len("open_chat_"):]
+        if "_page_" in payload:
+            unique_chat_id, page_str = payload.rsplit("_page_", 1)
+            try:
+                page = max(int(page_str), 1)
+            except ValueError:
+                page = 1
+        else:
+            unique_chat_id = payload
+            page = 1
         messages = session.exec(
             select(ChatMessage)
             .where(ChatMessage.unique_chat_id == unique_chat_id)
@@ -340,16 +375,43 @@ async def cb_handler(callback: CallbackQuery):
 
         owner_name = callback.from_user.full_name
         interlocutor_name = get_interlocutor_name(session, unique_chat_id, callback.from_user.id)
-        text = f"<b>💬 Чат: {owner_name} ↔ {interlocutor_name}</b>\n\n"
+        per_page = 20
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_messages = messages[start:end]
+        total_pages = max((len(messages) + per_page - 1) // per_page, 1)
+        text = f"<b>💬 Чат: {owner_name} ↔ {interlocutor_name}</b>\n"
+        text += f"<i>Страница {page}/{total_pages}</i>\n\n"
 
-        for msg in messages:
-            deleted_flag = msg.is_deleted or "" in msg.content or msg.content.startswith("Само сообщение")
-            content = msg.content.replace("", "").strip()
+        for msg in page_messages:
+            deleted_flag = msg.is_deleted or "🗑️" in msg.content or msg.content.startswith("Само сообщение")
+            content = msg.content.replace("🗑️", "").strip()
             if deleted_flag:
-                content = f"{content} "
+                content = f"{content} 🗑️"
             text += f"<b>@{msg.from_username or msg.from_name}:</b> {content}\n\n"
-
-        await callback.message.edit_text(text, reply_markup=back_keyboard())
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="⬅️ Предыдущая",
+                    callback_data=f"open_chat_{unique_chat_id}_page_{page - 1}",
+                )
+            )
+        if page < total_pages:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="➡️ Следующая",
+                    callback_data=f"open_chat_{unique_chat_id}_page_{page + 1}",
+                )
+            )
+        keyboard_rows = []
+        if nav_buttons:
+            keyboard_rows.append(nav_buttons)
+        keyboard_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+        await callback.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
+        )
 
 
 # ------------------------
@@ -490,7 +552,7 @@ async def handle_deleted_business_messages(deleted: BusinessMessagesDeleted):
         if stored_message.is_deleted:
             continue
         original_content = stored_message.content
-        stored_message.content = f"❌{original_content}"
+        stored_message.content = "Само сообщение 🗑️"
         stored_message.is_deleted = True
         session.add(stored_message)
         username = stored_message.from_username or stored_message.from_name
