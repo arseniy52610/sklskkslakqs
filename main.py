@@ -1,46 +1,35 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from aiogram import Bot, Dispatcher, html
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    Message as MessageType,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     BusinessConnection,
     BusinessMessagesDeleted,
-    Update,
-    WebAppInfo,
+    CallbackQuery,
     FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message as MessageType,
+    WebAppInfo,
 )
-from sqlmodel import SQLModel, Session as SQLSession, select, Field
 from babel.dates import format_date
+from sqlmodel import Field, SQLModel, Session as SQLSession, select
 
 import db
 
-# ------------------------
-# ТОКЕН БОТА
-# ------------------------
 TOKEN = "8016703176:AAFU1xJESuJyCqe2gTPeNLAW0_sn56T0tvE"
 
-# ------------------------
-# Инициализация бота и диспетчера
-# ------------------------
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# ------------------------
-# Админы
-# ------------------------
 ADMINS = [1947766225]
 
-# ------------------------
-# Модели БД
-# ------------------------
+
 class Subscription(SQLModel, table=True):
     user_id: int = Field(primary_key=True)
     active_until: datetime | None = None
@@ -58,51 +47,94 @@ class ChatMessage(SQLModel, table=True):
     content_type: str | None = None
     file_id: str | None = None
     caption: str | None = None
+    media_uid: str | None = Field(default=None, index=True, unique=True)
     is_deleted: bool = False
     edited_at: datetime | None = None
     created_at: datetime = Field(default_factory=datetime.now)
 
-
-# ------------------------
-# Проверка подписки
-# ------------------------
 
 def is_user_active(session: SQLSession, user_id: int) -> bool:
     sub = session.get(Subscription, user_id)
     return bool(sub and sub.active_until and sub.active_until > datetime.now())
 
 
-# ------------------------
-# Клавиатуры
-# ------------------------
-
 def start_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="📖 Инструкция",
-                web_app=WebAppInfo(url="https://z99526lr.beget.tech/"),
-            ),
-            InlineKeyboardButton(text="👤 Профиль", callback_data="profile")
-        ],
-        [
-            InlineKeyboardButton(text="💳 Периоды подписки", callback_data="periods")
-        ],
-        [
-            InlineKeyboardButton(text="💬 Все чаты", callback_data="all_chats")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📖 Инструкция",
+                    web_app=WebAppInfo(url="https://arseniy52610.github.io/stite/"),
+                ),
+                InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
+            ],
+            [InlineKeyboardButton(text="💳 Подписка", callback_data="periods")],
+            [InlineKeyboardButton(text="💬 Чаты", callback_data="all_chats")],
         ]
-    ])
+    )
 
 
 def back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
+    )
 
 
-# ------------------------
-# Хелперы
-# ------------------------
+def build_media_caption(msg: ChatMessage) -> str:
+    sender = f"@{msg.from_username}" if msg.from_username else msg.from_name
+    if msg.caption:
+        return f"Отправил: {sender}\n{msg.caption}"
+    return f"Отправил: {sender}"
+
+
+async def send_saved_media_by_uid(message: MessageType, media_uid: str) -> None:
+    session = SQLSession(db.engine)
+    msg = session.exec(select(ChatMessage).where(ChatMessage.media_uid == media_uid)).first()
+
+    if not msg or not msg.file_id or not msg.content_type:
+        await message.answer("⚠️ Медиа не найдено или уже удалено.")
+        return
+
+    media_caption = build_media_caption(msg)
+    if msg.content_type == "photo":
+        await message.answer_photo(photo=msg.file_id, caption=media_caption)
+    elif msg.content_type == "video":
+        await message.answer_video(video=msg.file_id, caption=media_caption)
+    elif msg.content_type == "video_note":
+        await message.answer_video_note(video_note=msg.file_id)
+        await message.answer(media_caption)
+    elif msg.content_type == "document":
+        await message.answer_document(document=msg.file_id, caption=media_caption)
+    elif msg.content_type == "audio":
+        await message.answer_audio(audio=msg.file_id, caption=media_caption)
+    elif msg.content_type == "voice":
+        await message.answer_voice(voice=msg.file_id, caption=media_caption)
+    elif msg.content_type == "animation":
+        await message.answer_animation(animation=msg.file_id, caption=media_caption)
+    else:
+        await message.answer("⚠️ Этот тип медиа пока не поддерживается.")
+
+
+@dp.message(CommandStart())
+async def cmd_start(message: MessageType):
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) > 1 and args[1].startswith("media_"):
+        media_uid = args[1].replace("media_", "", 1).strip()
+        if media_uid:
+            await send_saved_media_by_uid(message, media_uid)
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+    await message.answer(
+        f"👋 Привет, {html.bold(message.from_user.full_name)}!\n\n"
+        "Delixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
+        reply_markup=start_keyboard(),
+    )
+
+
 def get_interlocutor_name(session: SQLSession, unique_chat_id: str, owner_id: int) -> str:
     try:
         other_user_id = int(unique_chat_id.split("_", 1)[1])
@@ -125,21 +157,34 @@ def get_interlocutor_name(session: SQLSession, unique_chat_id: str, owner_id: in
     return f"ID {other_user_id}"
 
 
-# ------------------------
-# Старт
-# ------------------------
-@dp.message(CommandStart())
-async def cmd_start(message: MessageType):
-    await message.answer(
-        f"👋 Привет, {html.bold(message.from_user.full_name)}!\n\n"
-        "Delixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
-        reply_markup=start_keyboard()
+async def render_all_chats(callback: CallbackQuery, session: SQLSession) -> None:
+    user_id = callback.from_user.id
+    chats = session.exec(
+        select(ChatMessage.unique_chat_id)
+        .where(ChatMessage.unique_chat_id.like(f"{user_id}_%"))
+        .distinct()
+    ).all()
+
+    if not chats:
+        await callback.message.edit_text("💬 Нет сохраненных чатов.", reply_markup=back_keyboard())
+        return
+
+    owner_name = callback.from_user.full_name
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{owner_name} ↔ {get_interlocutor_name(session, chat, user_id)}",
+                    callback_data=f"open_chat_{chat}",
+                )
+            ]
+            for chat in chats
+        ]
+        + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
     )
+    await callback.message.edit_text("💬 Ваши чаты:\n\n⚠️ Все диалоги и медиа хранятся 3 дня, после чего автоматически удаляются.", reply_markup=keyboard)
 
 
-# ------------------------
-# Профиль
-# ------------------------
 @dp.callback_query(lambda c: c.data == "profile")
 async def cb_profile(callback: CallbackQuery):
     session = SQLSession(db.engine)
@@ -151,16 +196,13 @@ async def cb_profile(callback: CallbackQuery):
 
     if sub and sub.active_until and sub.active_until > datetime.now():
         until = format_date(sub.active_until, "d MMMM yyyy", locale="ru")
-        text += f"<b>✅Подписка активна до:</b> {until}"
+        text += f"<b> Роль:</b> Тестировщик"
     else:
         text += "<b>Подписка:</b> ❌ не активна"
 
     await callback.message.edit_text(text, reply_markup=back_keyboard())
 
 
-# ------------------------
-# Периоды подписки
-# ------------------------
 @dp.callback_query(lambda c: c.data == "periods")
 async def cb_periods(callback: CallbackQuery):
     session = SQLSession(db.engine)
@@ -171,7 +213,7 @@ async def cb_periods(callback: CallbackQuery):
         await callback.message.edit_text(
             f"⚠️ У вас уже активная подписка до <b>{format_date(sub.active_until, 'd MMMM', locale='ru')}</b>.\n"
             "Новая подписка оформить нельзя пока старая активна.",
-            reply_markup=back_keyboard()
+            reply_markup=back_keyboard(),
         )
         return
 
@@ -182,18 +224,17 @@ async def cb_periods(callback: CallbackQuery):
         "- Год: 1000 Stars ⭐\n\n"
         "Выберите нужный период для оплаты:"
     )
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Месяц", callback_data="pay_month")],
-        [InlineKeyboardButton(text="💳 Квартал", callback_data="pay_quarter")],
-        [InlineKeyboardButton(text="💳 Год", callback_data="pay_year")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]
-    ])
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💫 Месяц", callback_data="pay_month")],
+            [InlineKeyboardButton(text="💫 Квартал", callback_data="pay_quarter")],
+            [InlineKeyboardButton(text="💫 Год", callback_data="pay_year")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
+        ]
+    )
     await callback.message.edit_text(text, reply_markup=keyboard)
 
 
-# ------------------------
-# Оплата подписки
-# ------------------------
 @dp.callback_query(lambda c: c.data in {"pay_month", "pay_quarter", "pay_year"})
 async def cb_pay_period(callback: CallbackQuery):
     session = SQLSession(db.engine)
@@ -223,14 +264,11 @@ async def cb_pay_period(callback: CallbackQuery):
         description=f"<b>{title} на DelixorBOT</b>",
         payload=f"{callback.data}_{user_id}_{int(datetime.now().timestamp())}",
         currency="XTR",
-        prices=[{"label": title, "amount": amount}]
+        prices=[{"label": title, "amount": amount}],
     )
 
 
-# ------------------------
-# Gift подписка
-# ------------------------
-@dp.message(Command("gift"))
+@dp.message(Command("test"))
 async def cmd_gift(message: MessageType):
     if message.from_user.id not in ADMINS:
         return await message.answer("⚠️ Эта команда доступна только админам!")
@@ -257,27 +295,24 @@ async def cmd_gift(message: MessageType):
     try:
         await message.bot.send_message(
             chat_id=user_id,
-            text=f"🎁 Вам подарили подписку на DelixorBOT!\n✅ Подписка активна до {format_date(active_until, 'd MMMM yyyy', locale='ru')}"
+            text=f"💻 Вам выдали роль тестировщика DelixorBOT!",
         )
     except Exception:
         pass
 
     await message.answer(
-        f"✅ Подписка успешно подарена пользователю {user_id} до {format_date(active_until, 'd MMMM yyyy', locale='ru')}"
+        f"✅ Роль тестировщика успешно выдана пользователю с ID {user_id}",
     )
 
 
-# ------------------------
-# Выгрузка базы данных (админ)
-# ------------------------
-@dp.message(Command("dump_db"))
+@dp.message(Command("db"))
 async def cmd_dump_db(message: MessageType):
     if message.from_user.id not in ADMINS:
         return await message.answer("⚠️ Эта команда доступна только админам!")
 
     db_path = getattr(db.engine.url, "database", None)
     if not db_path:
-        return await message.answer("⚠️ Не удалось определить путь к базе данных.")
+        return await message.answer("⚠️ Для удалённой БД выгрузка файлом недоступна.")
 
     if not db_path.endswith(".db"):
         return await message.answer("⚠️ Поддерживается только SQLite база данных.")
@@ -292,24 +327,18 @@ async def cmd_dump_db(message: MessageType):
         await message.answer("⚠️ Не удалось отправить файл базы данных.")
 
 
-# ------------------------
-# Бизнес-сообщения
-# ------------------------
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
     user_chat_id = connection.user_chat_id
     if connection.is_enabled:
         await connection.bot.send_message(
             chat_id=user_chat_id,
-            text="✅ <b>Бот успешно подключен!</b>\n\nТеперь я буду сохранять и отслеживать сообщения ✨"
+            text="✅ <b>Бот успешно подключен!</b>\n\nТеперь я буду сохранять и отслеживать сообщения ✨",
         )
     else:
-        await connection.bot.send_message(chat_id=user_chat_id, text="Будем вас ждать снова 💖")
+        await connection.bot.send_message(chat_id=user_chat_id, text=f"Мы будем скучать! 😢\n\nБот отключён, и я больше не буду сохранять сообщения.")
 
 
-# ------------------------
-# Inline кнопки
-# ------------------------
 @dp.callback_query()
 async def cb_handler(callback: CallbackQuery):
     session = SQLSession(db.engine)
@@ -323,37 +352,21 @@ async def cb_handler(callback: CallbackQuery):
             "<blockquote>⚠️ Для подключения нашего мода требуется Telegram Premium</blockquote>",
             reply_markup=back_keyboard(),
         )
+    elif callback.data == "noop":
+        await callback.answer()
+    elif callback.data == "back_to_chats":
+        await render_all_chats(callback, session)
     elif callback.data == "back":
         await callback.message.edit_text(
             f"👋 Привет, {html.bold(callback.from_user.full_name)}!\n\n"
             "Delixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
-            reply_markup=start_keyboard()
+            reply_markup=start_keyboard(),
         )
     elif callback.data == "all_chats":
-        user_id = callback.from_user.id
-        chats = session.exec(
-            select(ChatMessage.unique_chat_id)
-            .where(ChatMessage.unique_chat_id.like(f"{user_id}_%"))
-            .distinct()
-        ).all()
-
-        if not chats:
-            await callback.message.edit_text("💬 Нет сохраненных чатов.", reply_markup=back_keyboard())
-            return
-
-        owner_name = callback.from_user.full_name
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(
-                    text=f"{owner_name} ↔ {get_interlocutor_name(session, chat, user_id)}",
-                    callback_data=f"open_chat_{chat}"
-                )] for chat in chats
-            ] + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
-        )
-        await callback.message.edit_text("💬 Ваши чаты:", reply_markup=keyboard)
+        await render_all_chats(callback, session)
 
     elif callback.data.startswith("open_chat_"):
-        payload = callback.data[len("open_chat_"):]
+        payload = callback.data[len("open_chat_") :]
         if "_page_" in payload:
             unique_chat_id, page_str = payload.rsplit("_page_", 1)
             try:
@@ -370,9 +383,12 @@ async def cb_handler(callback: CallbackQuery):
         ).all()
 
         if not messages:
-            await callback.message.edit_text("💬 Сообщения в этом чате отсутствуют.", reply_markup=back_keyboard())
+            await callback.message.edit_text(
+                "💬 Сообщения в этом чате отсутствуют.", reply_markup=back_keyboard()
+            )
             return
 
+        bot_username = (await callback.bot.get_me()).username
         owner_name = callback.from_user.full_name
         interlocutor_name = get_interlocutor_name(session, unique_chat_id, callback.from_user.id)
         per_page = 20
@@ -380,15 +396,37 @@ async def cb_handler(callback: CallbackQuery):
         end = start + per_page
         page_messages = messages[start:end]
         total_pages = max((len(messages) + per_page - 1) // per_page, 1)
-        text = f"<b>💬 Чат: {owner_name} ↔ {interlocutor_name}</b>\n"
-        text += f"<i>Страница {page}/{total_pages}</i>\n\n"
+        text = f"<b>💬 Чат: {owner_name} ↔ {interlocutor_name}</b>\n\n"
 
+        media_type_labels = {
+            "photo": "[Фото]",
+            "video": "[Видео]",
+            "video_note": "[Кружок]",
+            "document": "[Файл]",
+            "audio": "[Аудио]",
+            "voice": "[Голосовое]",
+            "animation": "[GIF]",
+        }
         for msg in page_messages:
             deleted_flag = msg.is_deleted or "🗑️" in msg.content or msg.content.startswith("Само сообщение")
             content = msg.content.replace("🗑️", "").strip()
+            display_name = (msg.from_username or msg.from_name).strip()
+
+            if msg.file_id and msg.content_type and msg.media_uid:
+                media_label = media_type_labels.get(msg.content_type, "[Медиа]")
+                if deleted_flag:
+                    media_label = f"❌ {media_label}"
+                text += f"<b>@{display_name}:</b> "
+                text += (
+                    f"<a href=\"https://t.me/{bot_username}?start=media_{msg.media_uid}\">"
+                    f"{media_label}</a>\n\n"
+                )
+                continue
+
             if deleted_flag:
-                content = f"{content} 🗑️"
-            text += f"<b>@{msg.from_username or msg.from_name}:</b> {content}\n\n"
+                content = f"❌{content}"
+            text += f"<b>@{display_name}:</b> {content}\n\n"
+
         nav_buttons = []
         if page > 1:
             nav_buttons.append(
@@ -397,6 +435,7 @@ async def cb_handler(callback: CallbackQuery):
                     callback_data=f"open_chat_{unique_chat_id}_page_{page - 1}",
                 )
             )
+        nav_buttons.append(InlineKeyboardButton(text=f"{page}/{total_pages}", callback_data="noop"))
         if page < total_pages:
             nav_buttons.append(
                 InlineKeyboardButton(
@@ -404,25 +443,53 @@ async def cb_handler(callback: CallbackQuery):
                     callback_data=f"open_chat_{unique_chat_id}_page_{page + 1}",
                 )
             )
+
         keyboard_rows = []
         if nav_buttons:
             keyboard_rows.append(nav_buttons)
-        keyboard_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back")])
+        keyboard_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_chats")])
         await callback.message.edit_text(
             text,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard_rows),
         )
 
+    elif callback.data.startswith("media_"):
+        msg_id_str = callback.data[len("media_") :]
+        if not msg_id_str.isdigit():
+            await callback.answer("Некорректный идентификатор медиа", show_alert=True)
+            return
 
-# ------------------------
-# Сохранение сообщений
-# ------------------------
+        msg = session.get(ChatMessage, int(msg_id_str))
+        if not msg or not msg.file_id or not msg.content_type:
+            await callback.answer("Медиа не найдено", show_alert=True)
+            return
+
+        await callback.answer("Отправляю медиа…")
+        media_caption = build_media_caption(msg)
+        if msg.content_type == "photo":
+            await callback.message.answer_photo(photo=msg.file_id, caption=media_caption)
+        elif msg.content_type == "video":
+            await callback.message.answer_video(video=msg.file_id, caption=media_caption)
+        elif msg.content_type == "video_note":
+            await callback.message.answer_video_note(video_note=msg.file_id)
+            await callback.message.answer(media_caption)
+        elif msg.content_type == "document":
+            await callback.message.answer_document(document=msg.file_id, caption=media_caption)
+        elif msg.content_type == "audio":
+            await callback.message.answer_audio(audio=msg.file_id, caption=media_caption)
+        elif msg.content_type == "voice":
+            await callback.message.answer_voice(voice=msg.file_id, caption=media_caption)
+        elif msg.content_type == "animation":
+            await callback.message.answer_animation(animation=msg.file_id, caption=media_caption)
+        else:
+            await callback.answer("Тип медиа пока не поддерживается", show_alert=True)
+
+
 @dp.business_message()
 async def save_business(message: MessageType):
     session = SQLSession(db.engine)
     bc = await message.bot.get_business_connection(message.business_connection_id)
 
-    # Уникальный чат для 1-на-1 с конкретным собеседником
     if message.from_user.id == bc.user_chat_id:
         other_user_id = message.chat.id
     else:
@@ -436,7 +503,7 @@ async def save_business(message: MessageType):
             text="⚠️ У вас нет активной подписки! Оплатите Stars ⭐",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить", callback_data="periods")]]
-            )
+            ),
         )
         return
 
@@ -453,6 +520,10 @@ async def save_business(message: MessageType):
         content_type = "video"
         file_id = message.video.file_id
         content = caption or "[Видео]"
+    elif message.video_note:
+        content_type = "video_note"
+        file_id = message.video_note.file_id
+        content = "[Кружок]"
     elif message.document:
         content_type = "document"
         file_id = message.document.file_id
@@ -471,6 +542,7 @@ async def save_business(message: MessageType):
         content = caption or "[GIF]"
 
     if message.text or file_id:
+        media_uid = uuid4().hex if file_id else None
         session.add(
             ChatMessage(
                 unique_chat_id=unique_chat_id,
@@ -482,14 +554,12 @@ async def save_business(message: MessageType):
                 content_type=content_type or "text",
                 file_id=file_id,
                 caption=caption or None,
+                media_uid=media_uid,
             )
         )
         session.commit()
 
 
-# ------------------------
-# Отслеживание изменений сообщений
-# ------------------------
 @dp.edited_business_message()
 async def handle_edited_business_message(message: MessageType):
     session = SQLSession(db.engine)
@@ -520,13 +590,10 @@ async def handle_edited_business_message(message: MessageType):
             text=(
                 f"<b>✏️@{username} изменил сообщение</b>\n"
                 f"<blockquote>💬{old_content} ➜ {message.text}</blockquote>"
-            )
+            ),
         )
 
 
-# ------------------------
-# Отслеживание удалений сообщений
-# ------------------------
 @dp.deleted_business_messages()
 async def handle_deleted_business_messages(deleted: BusinessMessagesDeleted):
     session = SQLSession(db.engine)
@@ -552,7 +619,7 @@ async def handle_deleted_business_messages(deleted: BusinessMessagesDeleted):
         if stored_message.is_deleted:
             continue
         original_content = stored_message.content
-        stored_message.content = "Само сообщение 🗑️"
+        stored_message.content = f"{original_content} 🗑️"
         stored_message.is_deleted = True
         session.add(stored_message)
         username = stored_message.from_username or stored_message.from_name
@@ -562,7 +629,7 @@ async def handle_deleted_business_messages(deleted: BusinessMessagesDeleted):
             text=(
                 f"<b>🗑️@{username} удалил сообщение</b>\n"
                 f"<blockquote>💬{original_content}</blockquote>"
-            )
+            ),
         )
 
         if stored_message.file_id and stored_message.content_type:
@@ -582,6 +649,18 @@ async def handle_deleted_business_messages(deleted: BusinessMessagesDeleted):
                     if stored_message.caption
                     else media_caption,
                 )
+            elif stored_message.content_type == "video_note":
+                await deleted.bot.send_video_note(
+                    chat_id=bc.user_chat_id,
+                    video_note=stored_message.file_id,
+                )
+                if stored_message.caption:
+                    await deleted.bot.send_message(
+                        chat_id=bc.user_chat_id,
+                        text=f"{media_caption}\n{stored_message.caption}",
+                    )
+                else:
+                    await deleted.bot.send_message(chat_id=bc.user_chat_id, text=media_caption)
             elif stored_message.content_type == "document":
                 await deleted.bot.send_document(
                     chat_id=bc.user_chat_id,
@@ -618,25 +697,17 @@ async def handle_deleted_business_messages(deleted: BusinessMessagesDeleted):
     session.commit()
 
 
-# ------------------------
-# Очистка старых сообщений (3 дня)
-# ------------------------
 async def cleanup_old_messages():
     while True:
         session = SQLSession(db.engine)
         threshold = datetime.now() - timedelta(days=3)
-        old_msgs = session.exec(
-            select(ChatMessage).where(ChatMessage.created_at < threshold)
-        ).all()
+        old_msgs = session.exec(select(ChatMessage).where(ChatMessage.created_at < threshold)).all()
         for msg in old_msgs:
             session.delete(msg)
         session.commit()
-        await asyncio.sleep(3600)  # раз в час
+        await asyncio.sleep(3600)
 
 
-# ------------------------
-# Запуск
-# ------------------------
 async def main():
     db.init()
     SQLModel.metadata.create_all(db.engine)
