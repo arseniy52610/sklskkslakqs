@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from aiogram import Bot, Dispatcher, html
@@ -23,6 +24,7 @@ from sqlmodel import Field, SQLModel, Session as SQLSession, select
 import db
 
 TOKEN = "8016703176:AAFU1xJESuJyCqe2gTPeNLAW0_sn56T0tvE"
+BOT_USERNAME = "testing_lirikoww_bot"
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
@@ -34,6 +36,19 @@ class Subscription(SQLModel, table=True):
     user_id: int = Field(primary_key=True)
     active_until: datetime | None = None
     last_charge_id: str | None = None
+
+
+class BusinessStatus(SQLModel, table=True):
+    user_id: int = Field(primary_key=True)
+    is_connected: bool = False
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class MenuState(SQLModel, table=True):
+    user_id: int = Field(primary_key=True)
+    chat_id: int
+    message_id: int
+    updated_at: datetime = Field(default_factory=datetime.now)
 
 
 class ChatMessage(SQLModel, table=True):
@@ -58,18 +73,43 @@ def is_user_active(session: SQLSession, user_id: int) -> bool:
     return bool(sub and sub.active_until and sub.active_until > datetime.now())
 
 
-def start_keyboard() -> InlineKeyboardMarkup:
+def build_webapp_url(session: SQLSession, user) -> str:
+    base_url = "https://arseniy52610.github.io/DelixorMiniApp/"
+    user_id = user.id
+    status = session.get(BusinessStatus, user_id)
+
+    user_messages = session.exec(
+        select(ChatMessage).where(ChatMessage.unique_chat_id.like(f"{user_id}_%"))
+    ).all()
+
+    params = {
+        "id": user_id,
+        "username": user.username or "",
+        "name": user.full_name or "",
+        "avatar": getattr(user, "photo_url", "") or "",
+        "bot_username": BOT_USERNAME,
+        "close_on_pay": "1",
+        "connected": "1" if status and status.is_connected else "0",
+        "deleted": sum(1 for m in user_messages if m.is_deleted),
+        "edited": sum(1 for m in user_messages if m.edited_at is not None),
+        "incoming": sum(1 for m in user_messages if m.from_user_id != user_id),
+        "outgoing": sum(1 for m in user_messages if m.from_user_id == user_id),
+    }
+    return f"{base_url}?{urlencode(params)}"
+
+
+def start_keyboard(webapp_url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📖 Инструкция",
-                    web_app=WebAppInfo(url="https://arseniy52610.github.io/stite/"),
+                    text="💫 Delixor",
+                    web_app=WebAppInfo(url=webapp_url),
                 ),
-                InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
+                InlineKeyboardButton(text="📖 Ваши чаты", callback_data="all_chats")],
+            [
+                InlineKeyboardButton(text="📣 Наш канал", url="https://t.me/delixornews"),
             ],
-            [InlineKeyboardButton(text="💳 Подписка", callback_data="periods")],
-            [InlineKeyboardButton(text="💬 Чаты", callback_data="all_chats")],
         ]
     )
 
@@ -78,6 +118,49 @@ def back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
     )
+
+
+def store_menu_state(session: SQLSession, user_id: int, chat_id: int, message_id: int) -> None:
+    state = session.get(MenuState, user_id) or MenuState(
+        user_id=user_id,
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+    state.chat_id = chat_id
+    state.message_id = message_id
+    state.updated_at = datetime.now()
+    session.add(state)
+    session.commit()
+
+
+async def refresh_menu_link(bot: Bot, session: SQLSession, user_id: int) -> None:
+    state = session.get(MenuState, user_id)
+    if not state:
+        return
+
+    try:
+        user = await bot.get_chat(user_id)
+    except Exception:
+        return
+
+    webapp_url = build_webapp_url(session, user)
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=state.chat_id,
+            message_id=state.message_id,
+            reply_markup=start_keyboard(webapp_url),
+        )
+    except Exception:
+        return
+
+
+async def periodic_refresh_menu_links(interval_seconds: int = 60) -> None:
+    while True:
+        session = SQLSession(db.engine)
+        states = session.exec(select(MenuState)).all()
+        for state in states:
+            await refresh_menu_link(bot, session, state.user_id)
+        await asyncio.sleep(interval_seconds)
 
 
 def build_media_caption(msg: ChatMessage) -> str:
@@ -115,6 +198,44 @@ async def send_saved_media_by_uid(message: MessageType, media_uid: str) -> None:
         await message.answer("⚠️ Этот тип медиа пока не поддерживается.")
 
 
+async def send_subscription_invoice(
+    bot_instance: Bot, session: SQLSession, user_id: int, period: str
+) -> None:
+    if is_user_active(session, user_id):
+        sub = session.get(Subscription, user_id)
+        await bot_instance.send_message(
+            chat_id=user_id,
+            text=(
+                f"⚠️ У вас уже есть активная подписка до "
+                f"{format_date(sub.active_until, 'd MMMM', locale='ru')}.\n"
+                "Новая подписка оформить нельзя пока старая активна."
+            ),
+        )
+        return
+
+    if period == "month":
+        amount = 100
+        title = "Подписка на месяц в DelixorBOT"
+    elif period == "quarter":
+        amount = 270
+        title = "Подписка на квартал в DelixorBOT"
+    elif period == "year":
+        amount = 1000
+        title = "Подписка на год в DelixorBOT"
+    else:
+        await bot_instance.send_message(chat_id=user_id, text="⚠️ Неизвестный период оплаты.")
+        return
+
+    await bot_instance.send_invoice(
+        chat_id=user_id,
+        title=title,
+        description=f"💫 Delixor - модифицированный мод для Telegram{title}",
+        payload=f"pay_{period}_{user_id}_{int(datetime.now().timestamp())}",
+        currency="XTR",
+        prices=[{"label": title, "amount": amount}],
+    )
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: MessageType):
     args = (message.text or "").split(maxsplit=1)
@@ -127,12 +248,24 @@ async def cmd_start(message: MessageType):
             except Exception:
                 pass
             return
+    if len(args) > 1 and args[1].startswith("pay_"):
+        period = args[1].replace("pay_", "", 1).strip()
+        session = SQLSession(db.engine)
+        await send_subscription_invoice(message.bot, session, message.from_user.id, period)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
 
-    await message.answer(
+    session = SQLSession(db.engine)
+    webapp_url = build_webapp_url(session, message.from_user)
+    sent = await message.answer(
         f"👋 Привет, {html.bold(message.from_user.full_name)}!\n\n"
         "Delixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
-        reply_markup=start_keyboard(),
+        reply_markup=start_keyboard(webapp_url),
     )
+    store_menu_state(session, message.from_user.id, sent.chat.id, sent.message_id)
 
 
 def get_interlocutor_name(session: SQLSession, unique_chat_id: str, owner_id: int) -> str:
@@ -182,7 +315,7 @@ async def render_all_chats(callback: CallbackQuery, session: SQLSession) -> None
         ]
         + [[InlineKeyboardButton(text="⬅️ Назад", callback_data="back")]]
     )
-    await callback.message.edit_text("💬 Ваши чаты:\n\n⚠️ Все диалоги и медиа хранятся 3 дня, после чего автоматически удаляются.", reply_markup=keyboard)
+    await callback.message.edit_text("💬 Ваши чаты:", reply_markup=keyboard)
 
 
 @dp.callback_query(lambda c: c.data == "profile")
@@ -196,7 +329,7 @@ async def cb_profile(callback: CallbackQuery):
 
     if sub and sub.active_until and sub.active_until > datetime.now():
         until = format_date(sub.active_until, "d MMMM yyyy", locale="ru")
-        text += f"<b> Роль:</b> Тестировщик"
+        text += f"<b>✅Подписка активна до:</b> {until}"
     else:
         text += "<b>Подписка:</b> ❌ не активна"
 
@@ -226,9 +359,9 @@ async def cb_periods(callback: CallbackQuery):
     )
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💫 Месяц", callback_data="pay_month")],
-            [InlineKeyboardButton(text="💫 Квартал", callback_data="pay_quarter")],
-            [InlineKeyboardButton(text="💫 Год", callback_data="pay_year")],
+            [InlineKeyboardButton(text="💳 Месяц", callback_data="pay_month")],
+            [InlineKeyboardButton(text="💳 Квартал", callback_data="pay_quarter")],
+            [InlineKeyboardButton(text="💳 Год", callback_data="pay_year")],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back")],
         ]
     )
@@ -268,7 +401,7 @@ async def cb_pay_period(callback: CallbackQuery):
     )
 
 
-@dp.message(Command("test"))
+@dp.message(Command("gift"))
 async def cmd_gift(message: MessageType):
     if message.from_user.id not in ADMINS:
         return await message.answer("⚠️ Эта команда доступна только админам!")
@@ -295,17 +428,17 @@ async def cmd_gift(message: MessageType):
     try:
         await message.bot.send_message(
             chat_id=user_id,
-            text=f"💻 Вам выдали роль тестировщика DelixorBOT!",
+            text=f"🎁 Вам подарили подписку на DelixorBOT!\n✅ Подписка активна до {format_date(active_until, 'd MMMM yyyy', locale='ru')}",
         )
     except Exception:
         pass
 
     await message.answer(
-        f"✅ Роль тестировщика успешно выдана пользователю с ID {user_id}",
+        f"✅ Подписка успешно подарена пользователю {user_id} до {format_date(active_until, 'd MMMM yyyy', locale='ru')}"
     )
 
 
-@dp.message(Command("db"))
+@dp.message(Command("dump_db"))
 async def cmd_dump_db(message: MessageType):
     if message.from_user.id not in ADMINS:
         return await message.answer("⚠️ Эта команда доступна только админам!")
@@ -330,14 +463,20 @@ async def cmd_dump_db(message: MessageType):
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
     user_chat_id = connection.user_chat_id
+    session = SQLSession(db.engine)
+    status = session.get(BusinessStatus, user_chat_id) or BusinessStatus(user_id=user_chat_id)
+    status.is_connected = bool(connection.is_enabled)
+    status.updated_at = datetime.now()
+    session.add(status)
+    session.commit()
+
     if connection.is_enabled:
         await connection.bot.send_message(
             chat_id=user_chat_id,
             text="✅ <b>Бот успешно подключен!</b>\n\nТеперь я буду сохранять и отслеживать сообщения ✨",
         )
     else:
-        await connection.bot.send_message(chat_id=user_chat_id, text=f"Мы будем скучать! 😢\n\nБот отключён, и я больше не буду сохранять сообщения.")
-
+        await connection.bot.send_message(chat_id=user_chat_id, text="Будем вас ждать снова 💖")
 
 @dp.callback_query()
 async def cb_handler(callback: CallbackQuery):
@@ -347,7 +486,7 @@ async def cb_handler(callback: CallbackQuery):
             "<b>💫 Для подключения Delixor выполните следующие шаги:</b>\n\n"
             "▶ Откройте настройки Telegram\n"
             "▶ Перейдите в раздел «Telegram для Бизнеса»\n"
-            "▶ Выберите «Чат-боты» и найдите DelixorBot\n\n"
+            f"▶ Выберите «Чат-боты» и найдите {BOT_USERNAME}\n\n"
             "<blockquote>💻 В разрешениях для бота выберите все пункты раздела Сообщения (5/5)</blockquote>\n"
             "<blockquote>⚠️ Для подключения нашего мода требуется Telegram Premium</blockquote>",
             reply_markup=back_keyboard(),
@@ -357,11 +496,13 @@ async def cb_handler(callback: CallbackQuery):
     elif callback.data == "back_to_chats":
         await render_all_chats(callback, session)
     elif callback.data == "back":
+        webapp_url = build_webapp_url(session, callback.from_user)
         await callback.message.edit_text(
             f"👋 Привет, {html.bold(callback.from_user.full_name)}!\n\n"
             "Delixor сохраняет удалённые и изменённые сообщения в чатах. Ничего лишнего — только контроль и прозрачность",
-            reply_markup=start_keyboard(),
+            reply_markup=start_keyboard(webapp_url),
         )
+        store_menu_state(session, callback.from_user.id, callback.message.chat.id, callback.message.message_id)
     elif callback.data == "all_chats":
         await render_all_chats(callback, session)
 
@@ -388,7 +529,6 @@ async def cb_handler(callback: CallbackQuery):
             )
             return
 
-        bot_username = (await callback.bot.get_me()).username
         owner_name = callback.from_user.full_name
         interlocutor_name = get_interlocutor_name(session, unique_chat_id, callback.from_user.id)
         per_page = 20
@@ -418,7 +558,7 @@ async def cb_handler(callback: CallbackQuery):
                     media_label = f"❌ {media_label}"
                 text += f"<b>@{display_name}:</b> "
                 text += (
-                    f"<a href=\"https://t.me/{bot_username}?start=media_{msg.media_uid}\">"
+                    f"<a href=\"https://t.me/{BOT_USERNAME}?start=media_{msg.media_uid}\">"
                     f"{media_label}</a>\n\n"
                 )
                 continue
@@ -695,6 +835,7 @@ async def handle_deleted_business_messages(deleted: BusinessMessagesDeleted):
                 )
 
     session.commit()
+    await refresh_menu_link(deleted.bot, session, bc.user_chat_id)
 
 
 async def cleanup_old_messages():
@@ -712,6 +853,7 @@ async def main():
     db.init()
     SQLModel.metadata.create_all(db.engine)
     asyncio.create_task(cleanup_old_messages())
+    asyncio.create_task(periodic_refresh_menu_links())
     await dp.start_polling(bot)
 
 
