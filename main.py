@@ -571,7 +571,7 @@ async def cb_handler(callback: CallbackQuery):
         if page > 1:
             nav_buttons.append(
                 InlineKeyboardButton(
-                    text="⬅️ Предыдущая",
+                    text="⬅️",
                     callback_data=f"open_chat_{unique_chat_id}_page_{page - 1}",
                 )
             )
@@ -579,7 +579,7 @@ async def cb_handler(callback: CallbackQuery):
         if page < total_pages:
             nav_buttons.append(
                 InlineKeyboardButton(
-                    text="➡️ Следующая",
+                    text="➡️",
                     callback_data=f"open_chat_{unique_chat_id}_page_{page + 1}",
                 )
             )
