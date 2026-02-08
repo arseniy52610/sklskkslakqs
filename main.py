@@ -24,7 +24,7 @@ from sqlmodel import Field, SQLModel, Session as SQLSession, select
 import db
 
 TOKEN = "8016703176:AAFU1xJESuJyCqe2gTPeNLAW0_sn56T0tvE"
-BOT_USERNAME = "testing_lirikoww_bot"
+BOT_USERNAME = "DelixorBot"
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
